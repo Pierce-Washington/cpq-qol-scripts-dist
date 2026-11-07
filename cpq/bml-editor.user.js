@@ -12,8 +12,8 @@
 // @match        https://*.bigmachines.com/*/configuration/pipeline_viewer_config.jsp*
 // @match        https://*.oraclegovcloud2.com/*/spring/bmllibrary*
 // @match        https://*.bigmachines.com/*/spring/bmllibrary*
-// @updateURL    https://github.com/Pierce-Washington/cpq-qol-scripts-dist/raw/main/cpq/bml-editor.js
-// @downloadURL  https://github.com/Pierce-Washington/cpq-qol-scripts-dist/raw/main/cpq/bml-editor.js
+// @updateURL    https://github.com/Pierce-Washington/cpq-qol-scripts-dist/raw/main/cpq/bml-editor.user.js
+// @downloadURL  https://github.com/Pierce-Washington/cpq-qol-scripts-dist/raw/main/cpq/bml-editor.user.js
 // @grant        unsafeWindow
 // @grant        GM_getValue
 // @grant        GM_setValue
