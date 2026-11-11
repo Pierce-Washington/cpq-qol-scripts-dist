@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CPQ General Improvements
 // @namespace    http://tampermonkey.net
-// @version      1.1
+// @version      1.2
 // @description  General CPQ quality of life tweaks
 // @author       Sven Hansen (PW)
 // @match        https://*.oraclegovcloud2.com/ords/r/cx-cpq/administration/*
@@ -17,11 +17,18 @@
 // @grant        GM_unregisterMenuCommand
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
-// @noframes
 // ==/UserScript==
 
 (function () {
     'use strict';
+
+    // APEX opens some editors (e.g. create-edit-attributes) in dialog iframes.
+    // Only the menu-definition tools apply inside frames; everything else
+    // (favicon, keep-alive, viewers) runs top-window only.
+    if (window.self !== window.top) {
+        setupMenuListTools();
+        return;
+    }
 
     const SITE_NAME = window.location.host.split('.')[0];
     const FAVICON_WINDOW = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -1105,6 +1112,308 @@
         if (document.body) start();
         else document.addEventListener('DOMContentLoaded', start, { once: true });
     })();
+
+    /***************************
+     * Menu definition import/export — on attribute edit pages, the static menu
+     * ("Menu Definition") is a JET oj-table ([id$="seledit-table"]) bound to
+     * knockout rows {displayedText, variableName}; persistence runs through
+     * updateCLOB on input blur. Copy List serializes the current options as
+     * one-per-line "display|variable" (pipe omitted when they match); Import
+     * List adds options from the same format by driving the page's own
+     * Add Entry button + inputs so the normal save path fires.
+     ***************************/
+    setupMenuListTools();
+    function setupMenuListTools() {
+        const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        const pageDoc = pageWindow.document;
+
+        GM_addStyle(`
+            .tm-menulist-btn {
+                margin-right: 8px;
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: 600;
+                color: #8b95d6;
+                background: transparent;
+                border: 1px solid #8b95d6;
+                border-radius: 4px;
+                cursor: pointer;
+                white-space: nowrap;
+            }
+            .tm-menulist-btn:hover { color: #5b68c0; border-color: #5b68c0; }
+            #tm-menulist-panel {
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                z-index: 2147483646;
+                width: 420px;
+                padding: 14px;
+                background: #fff;
+                border: 1px solid #b6bdd1;
+                border-radius: 8px;
+                box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+                font-size: 13px;
+            }
+            #tm-menulist-panel textarea {
+                box-sizing: border-box;
+                width: 100%;
+                height: 200px;
+                margin: 8px 0;
+                font-family: monospace;
+                font-size: 12px;
+            }
+            #tm-menulist-status { color: #5b68c0; min-height: 1.2em; }
+        `);
+
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+        async function waitUntil(check, timeout = 4000, interval = 50) {
+            const end = Date.now() + timeout;
+            while (Date.now() < end) {
+                const result = check();
+                if (result) return result;
+                await sleep(interval);
+            }
+            return null;
+        }
+
+        // Edit pages use p##-seledit-table / p##-edit-add-menu-item; the
+        // create-attribute page uses p##-table / p##-add-menu-item.
+        const getMenuTable = () => pageDoc.querySelector(
+            'oj-table[aria-label="Menu Definition"], oj-table[id$="seledit-table"]');
+        const getAddEntryButton = () => pageDoc.querySelector(
+            'oj-button[id$="add-menu-item"] button');
+
+        async function readMenuRows() {
+            const table = getMenuTable();
+            if (!table?.data) throw new Error('Menu table data is not ready.');
+            const rows = [];
+            const iterator = table.data.fetchFirst({ size: -1 })[Symbol.asyncIterator]();
+            for (let next = await iterator.next(); !next.done; next = await iterator.next()) {
+                next.value.data.forEach(data => rows.push(data));
+            }
+            return rows;
+        }
+
+        // Row fields may be plain strings, knockout observables (functions), or
+        // wrapper objects depending on how the page built its data provider.
+        function unwrapCell(value, depth = 0) {
+            if (value === null || value === undefined || depth > 4) return '';
+            if (typeof value === 'function') return unwrapCell(value(), depth + 1);
+            if (typeof value === 'object') {
+                for (const key of ['value', 'displayedText', 'variableName', 'text', 'label']) {
+                    if (key in value) return unwrapCell(value[key], depth + 1);
+                }
+                return '';
+            }
+            return String(value);
+        }
+
+        function serializeRows(rows) {
+            if (rows.length) console.debug('[tm-menulist] row sample:', rows[0]);
+            return rows.map(row => {
+                const data = typeof row === 'object' && row !== null && 'data' in row ? row.data : row;
+                const display = unwrapCell(data?.displayedText ?? data).trim();
+                const variable = unwrapCell(data?.variableName).trim();
+                return variable && variable !== display ? `${display}|${variable}` : display;
+            }).join('\n');
+        }
+
+        function parseList(text) {
+            return text.split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean)
+                .map(line => {
+                    const pipe = line.indexOf('|');
+                    if (pipe === -1) return { display: line, variable: line };
+                    return {
+                        display: line.slice(0, pipe).trim(),
+                        variable: line.slice(pipe + 1).trim() || line.slice(0, pipe).trim()
+                    };
+                });
+        }
+
+        // Mimic typing so JET syncs the knockout row and updateCLOB runs on blur
+        function setJetInput(ojInput, value) {
+            const input = ojInput.querySelector('input');
+            if (!input) throw new Error('Menu row input not found.');
+            input.focus();
+            input.value = value;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.blur();
+            input.dispatchEvent(new FocusEvent('blur'));
+            ojInput.dispatchEvent(new FocusEvent('blur'));
+        }
+
+        function menuRows(table) {
+            return [...table.querySelectorAll('tbody.oj-table-body tr')].map(row => {
+                const inputs = [...row.querySelectorAll('oj-input-text')];
+                const trash = [...row.querySelectorAll('oj-button')]
+                    .find(button => button.querySelector('.oj-ux-ico-trash'));
+                const deleteButton = trash && !trash.classList.contains('oj-disabled')
+                    ? trash.querySelector('button:not([disabled])') : null;
+                return inputs.length >= 2 ? { inputs, deleteButton } : null;
+            }).filter(Boolean);
+        }
+
+        // The page persists only via updateCLOB, which is bound to input blur —
+        // deleteAction just edits the knockout array. So never empty the table
+        // (a rerender would restore rows from the stale CLOB): overwrite rows
+        // in place, add extras, trim surplus last, then blur once more so the
+        // deletions reach the CLOB too.
+        async function importOptions(entries, statusEl) {
+            const table = getMenuTable();
+            const addButton = getAddEntryButton();
+            if (!table || !addButton) throw new Error('Menu definition editor not found on this page.');
+            const editable = () => menuRows(table).filter(row => row.deleteButton);
+
+            async function fillRow(row, entry) {
+                setJetInput(row.inputs[0], entry.display);
+                // Let setVariableName's auto-fill settle before overriding it
+                await sleep(80);
+                setJetInput(row.inputs[1], entry.variable);
+                await sleep(60);
+            }
+
+            // 0) Retire the old variable names first: overwriting in place can
+            //    otherwise trip duplicate-variable validation when a new name
+            //    matches a not-yet-overwritten old row. Unique temp names make
+            //    the old set collision-free before the real values go in.
+            const preexisting = editable();
+            if (preexisting.length && entries.length) {
+                const stamp = Date.now().toString(36);
+                for (let index = 0; index < preexisting.length; index++) {
+                    statusEl.textContent = `Preparing existing options… (${preexisting.length - index})`;
+                    setJetInput(preexisting[index].inputs[1], `tm_tmp_${stamp}_${index}`);
+                    await sleep(40);
+                }
+            }
+
+            // 1) Overwrite existing editable rows in place
+            const existing = editable();
+            const overwriteCount = Math.min(existing.length, entries.length);
+            for (let index = 0; index < overwriteCount; index++) {
+                statusEl.textContent = `Updating ${index + 1} of ${entries.length}: ${entries[index].display}`;
+                await fillRow(existing[index], entries[index]);
+            }
+
+            // 2) Add rows for the remaining entries
+            for (let index = overwriteCount; index < entries.length; index++) {
+                const entry = entries[index];
+                statusEl.textContent = `Adding ${index + 1} of ${entries.length}: ${entry.display}`;
+                const before = menuRows(table).length;
+                addButton.click();
+                const appeared = await waitUntil(() => menuRows(table).length > before);
+                if (!appeared) throw new Error(`Row did not appear for "${entry.display}".`);
+                const rows = editable();
+                await fillRow(rows[rows.length - 1], entry);
+            }
+
+            // Deletes alone never reach the CLOB (updateCLOB is blur-bound), so
+            // a rerender mid-trim would restore them. Persist after every
+            // delete by re-bluring a surviving input with its unchanged value.
+            function nudgePersist() {
+                const survivor = editable()[0];
+                if (!survivor) return;
+                const input = survivor.inputs[1].querySelector('input');
+                input?.focus();
+                input?.blur();
+                input?.dispatchEvent(new FocusEvent('blur'));
+                survivor.inputs[1].dispatchEvent(new FocusEvent('blur'));
+            }
+
+            // 3) Trim surplus rows from the end, persisting each removal
+            while (editable().length > entries.length) {
+                const rows = editable();
+                statusEl.textContent = `Removing surplus options… (${rows.length - entries.length} left)`;
+                const before = menuRows(table).length;
+                rows[rows.length - 1].deleteButton.click();
+                const removed = await waitUntil(() => menuRows(table).length < before);
+                if (!removed) throw new Error('Could not remove a surplus option.');
+                nudgePersist();
+                await sleep(150);
+            }
+            statusEl.textContent = `List replaced with ${entries.length} option${entries.length === 1 ? '' : 's'}.`;
+        }
+
+        function openImportPanel() {
+            document.getElementById('tm-menulist-panel')?.remove();
+            const panel = document.createElement('div');
+            panel.id = 'tm-menulist-panel';
+            panel.innerHTML = `
+                <strong>Import menu options</strong>
+                <div>One per line — <code>Display</code> or <code>Display|variableName</code></div>
+                <div><em>Replaces the current options (use Copy List first to keep a backup).</em></div>
+                <textarea spellcheck="false" placeholder="Opt1\nOpt2\nOpt4|Option4"></textarea>
+                <div id="tm-menulist-status"></div>
+                <button type="button" class="tm-menulist-btn" data-action="import">Replace options</button>
+                <button type="button" class="tm-menulist-btn" data-action="close">Close</button>
+            `;
+            const statusEl = panel.querySelector('#tm-menulist-status');
+            panel.querySelector('[data-action="close"]').addEventListener('click', () => panel.remove());
+            panel.querySelector('[data-action="import"]').addEventListener('click', async (event) => {
+                const entries = parseList(panel.querySelector('textarea').value);
+                if (!entries.length) {
+                    statusEl.textContent = 'Nothing to import.';
+                    return;
+                }
+                event.target.disabled = true;
+                try {
+                    await importOptions(entries, statusEl);
+                } catch (error) {
+                    statusEl.textContent = `Import failed: ${error.message}`;
+                } finally {
+                    event.target.disabled = false;
+                }
+            });
+            document.body.appendChild(panel);
+            panel.querySelector('textarea').focus();
+        }
+
+        function ensureMenuListButtons() {
+            if (document.getElementById('tm-menulist-copy')) return;
+            const addButton = getAddEntryButton();
+            const toolbar = addButton?.closest('oj-button')?.parentElement;
+            if (!toolbar || !getMenuTable()) return;
+
+            const copyButton = document.createElement('button');
+            copyButton.type = 'button';
+            copyButton.id = 'tm-menulist-copy';
+            copyButton.className = 'tm-menulist-btn';
+            copyButton.textContent = '⎘ Copy List';
+            copyButton.title = 'Copy menu options as Display|variableName lines';
+            copyButton.addEventListener('click', async () => {
+                try {
+                    GM_setClipboard(serializeRows(await readMenuRows()));
+                    copyButton.textContent = '✓ Copied';
+                } catch (error) {
+                    copyButton.textContent = '✗ Failed';
+                    console.error('[tm-menulist] copy failed:', error);
+                }
+                setTimeout(() => { copyButton.textContent = '⎘ Copy List'; }, 1500);
+            });
+
+            const importButton = document.createElement('button');
+            importButton.type = 'button';
+            importButton.id = 'tm-menulist-import';
+            importButton.className = 'tm-menulist-btn';
+            importButton.textContent = '⇪ Import List';
+            importButton.title = 'Add menu options from a pasted list';
+            importButton.addEventListener('click', openImportPanel);
+
+            toolbar.prepend(copyButton, importButton);
+        }
+
+        const observer = new MutationObserver(ensureMenuListButtons);
+        const start = () => {
+            observer.observe(document.body, { childList: true, subtree: true });
+            ensureMenuListButtons();
+        };
+        if (document.body) start();
+        else document.addEventListener('DOMContentLoaded', start, { once: true });
+    }
 
     /******* HELPERS */
     function waitForElement(selector) {

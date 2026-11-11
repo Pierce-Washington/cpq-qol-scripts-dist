@@ -951,6 +951,7 @@
         ],
         'Logs': [
             ['Administration Logs', '/cpq/adminaudit/view_admin_logs.jsp'],
+            ['Diagnostic Logs', '/fscmUI/redwood/cx-cpq/application/container/diagnostic-logs'],
             ['Error Logs', '/cpq/admin/log/edit_logging_properties.jsp'],
             ['Performance Logs', '/cpq/admin/pages/performanceLogsList']
         ],
